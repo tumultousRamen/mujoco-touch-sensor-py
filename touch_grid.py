@@ -1,24 +1,73 @@
 import ctypes
 import numpy as np
+import mujoco as mj
 from mujoco import MjModel, MjData, MjvScene, MjvOption
 
-class TouchGridPy:
-    def __init__(self, model, data, instance):
-        # Extracting configuration from model --> add attribute check before initialization
-        plugin_config = model.plugin_config[instance]
-        self.nchannel = int(plugin_config.get('nchannel', 1))
-        size = [int(x) for x in plugin_config['size'].split()]
-        self.size = np.array(size)
-        fov = [float(x) for x in plugin_config['fov'].split()]
-        self.fov = np.array(fov)
-        self.gamma = float(plugin_config.get('gamma', 0))
+# Checks if a plugin attribute attribute exists
+# Input: input_str (string)
+# Output: True if the attribute exists, False otherwise
+def check_attr(input_str):
+    value = ''.join(char for char in input_str if not char.isspace())
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
 
-        # Initialize data arrays to caluclate taxel positions and distances
-        self.x_edges = np.zeros(self.size[0] + 1)
-        self.y_edges = np.zeros(self.size[1] + 1)
-        self.distance = np.zeros(self.size[0] * self.size[1])
-        
-        # Calculate bin edges and taxel positions
+class TouchGridPy:
+    @staticmethod
+    def create(model, data, instance):
+        # Check if required attributes are present
+        required_attrs = ["gamma", "nchannel", "size", "fov"]
+        for attr in required_attrs:
+            if not check_attr(mj.mj_getPluginConfig(model, instance, attr)):
+                raise ValueError(f"Missing {attr} in touch_grid sensor plugin configuration")
+
+        # nchannel
+        nchannel = int(mj.mj_getPluginConfig(model, instance, "nchannel"))
+        if nchannel < 1 or nchannel > 6:
+            raise ValueError("nchannel must be between 1 and 6")
+
+        # size
+        size = [int(x) for x in mj.mj_getPluginConfig(model, instance, "size").split()]
+        if len(size) != 2:
+            raise ValueError("Both horizontal and vertical resolutions must be specified")
+        if size[0] <= 0 or size[1] <= 0:
+            raise ValueError("Horizontal and vertical resolutions must be positive")
+
+        # field of view
+        fov = [float(x) for x in mj.mj_getPluginConfig(model, instance, "fov").split()]
+        if len(fov) != 2:
+            raise ValueError("Both horizontal and vertical fields of view must be specified")
+        if fov[0] <= 0 or fov[0] > 180:
+            raise ValueError("fov[0] must be a float between (0, 180] degrees")
+        if fov[1] <= 0 or fov[1] > 90:
+            raise ValueError("fov[1] must be a float between (0, 90] degrees")
+
+        # gamma
+        gamma = float(model.plugin_config[instance]["gamma"])
+        if gamma < 0 or gamma > 1:
+            raise ValueError("gamma must be a nonnegative float between [0, 1]")
+
+        # Create and return the TouchGridPy instance
+        return TouchGridPy(model, data, instance, nchannel, size, fov, gamma)
+
+    def __init__(self, model, data, instance, nchannel, size, fov, gamma):
+        self.nchannel = nchannel
+        self.size = np.array(size)
+        self.fov = np.array(fov)
+        self.gamma = gamma
+
+        # Make sure sensor is attached to a site
+        for i in range(model.nsensor):
+            if model.sensor_type[i] == 'plugin' and model.sensor_plugin[i] == instance:
+                if model.sensor_objtype[i] != 'site':
+                    raise ValueError("Touch Grid sensor must be attached to a site")
+
+        # Allocate distance array
+        self.distance = np.zeros(size[0] * size[1])
+
+        # Initialize other necessary attributes
         self._calculate_bin_edges()
         self.taxel_positions = self._calculate_taxel_positions()
 
@@ -33,11 +82,12 @@ class TouchGridPy:
         self.x_edges = fovea(self.x_edges, self.gamma)
         self.y_edges = fovea(self.y_edges, self.gamma)
         
-        self.x_edges *= self.fov[0] * np.pi / 180
-        self.y_edges *= self.fov[1] * np.pi / 180
+        self.x_edges *= self.fov[0] * mj.mjPI / 180
+        self.y_edges *= self.fov[1] * mj.mjPI / 180
 
     def _calculate_taxel_positions(self):
         # Calculate center of each taxel in spherical coordinates
+        # Refer to Visualize in touch_grid.cc for the comprehesive implementation:
         x_centers = (self.x_edges[1:] + self.x_edges[:-1]) / 2
         y_centers = (self.y_edges[1:] + self.y_edges[:-1]) / 2
         xx, yy = np.meshgrid(x_centers, y_centers)
@@ -85,7 +135,6 @@ def touch_grid_compute(model, data, instance):
 
 def register_plugin():
     # This is a placeholder for the actual registration process
-    # The exact implementation will depend on how MuJoCo's Python API handles plugins
     pass
 
 if __name__ == "__main__":
